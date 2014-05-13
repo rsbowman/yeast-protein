@@ -2,20 +2,21 @@ import itertools
 from collections import defaultdict
 from math import floor
 
-from scipy.sparse import csc_matrix, lil_matrix
+from scipy.sparse import csc_matrix, lil_matrix, issparse
 import numpy as np
 import networkx as nx
 import prc
 
 def run_prc(adj_matrix, initial_order, n_clusters=2):
     #adj_matrix = csc_matrix(adjacency_matrix)
+    assert issparse(adj_matrix)
     N = adj_matrix.shape[0]
     order= prc.createOrder(initial_order)
     labels = prc.ivec([0] * N)
     policy = prc.prcPolicyStruct()
 
-    prc.pinchRatioClustering(adj_matrix, order, labels,
-                             n_clusters, policy)
+    prc.sparse_pinchRatioClustering(adj_matrix, order, labels,
+                                    n_clusters, policy)
     return np.fromiter(labels, dtype=int)
 
 def run_ipr(adj_matrix, initial_order, n_clusters):
@@ -234,8 +235,11 @@ class TransductiveClassifier(object):
         """ data is an adjacency matrix, vertices with label -1
         will be assigned labels
         """
+        if not issparse(data):
+            data = csc_matrix(data)
+            
         assert (data.diagonal() == 0.0).all()
-        graph = nx.from_numpy_matrix(data)
+        graph = nx.from_scipy_sparse_matrix(data)
         components = nx.connected_component_subgraphs(graph)
         if len(labels.shape) < 2:
             new_labels = labels.copy().reshape((len(labels), 1)).astype(float)
@@ -262,7 +266,7 @@ class TransductiveClassifier(object):
         return self
 
     def _fit_one_cpt(self, nx_cpt, labels):
-        adj_matrix = nx.to_numpy_matrix(nx_cpt).A
+        adj_matrix = nx.to_scipy_sparse_matrix(nx_cpt)
         ordering = np.arange(adj_matrix.shape[0])
         np.random.shuffle(ordering)
         n_clusters = self.n_clusters
@@ -295,12 +299,12 @@ class TransductiveClassifier(object):
     def _compute_cluster_proportion_parent(
             self, parent, label_index, nx_cpt,
             cluster_labels, labels, default_label):
-        if parent == 1:
+        if parent == 1: # only one cluster; compute local average
             lls = labels[nx_cpt.nodes(), label_index] # local labels
             lls = lls[lls != -1]
             if len(lls):
-                print "XXX: local default"
                 local_default_label = lls.sum() / float(len(lls))
+                #print "XXX: local default", local_default_label, lls
             else:
                 print "YYY: global default"
                 local_default_label = default_label
@@ -320,24 +324,25 @@ class TransductiveClassifier(object):
             return default_label
 
         max_cluster_label = cluster_labels.max()
-        children_clusters = child_labels_for(parent, max_cluster_label)
-        #if len(children_clusters.intersection(set(cluster_labels))) != 1:
-        #    print "XXXXXXXXX"
+        ## to use children_clusters, check below if cluster_labels[i]
+        ## is in the set
+        ##children_clusters = child_labels_for(parent, max_cluster_label)
+
         ones, total = 0.0, 0.0
         for i, node in enumerate(nx_cpt.nodes()):
             if (labels[node, label_index] != -1 and
-                cluster_labels[i] in children_clusters):
+                cluster_labels[i] == parent):
                 ones += labels[node, label_index]
                 total += 1.0
         if total > 0.0:
-            print "WWW: actually assigned probs."
-            return ones / total
+            #print "WWW: actually assigned probs."
+            return ones / total 
         else:
-            #return default_label
-            new_parent = int(floor(parent / 2.0))
-            return self._compute_cluster_proportion_parent(
-                new_parent, label_index, nx_cpt,
-                cluster_labels, labels, default_label)
+            return default_label
+            # new_parent = int(floor(parent / 2.0))
+            # return self._compute_cluster_proportion_parent(
+            #     new_parent, label_index, nx_cpt,
+            #     cluster_labels, labels, default_label)
         
     def _compute_cluster_proportion_new(self, cluster, label_index,
                                         nx_cpt, cluster_labels, labels,

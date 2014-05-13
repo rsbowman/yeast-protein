@@ -47,39 +47,40 @@ def balanced_accuracy(y_true, y_pred):
 
 def remove_small_components(full_adj_matrix, labels, min_nodes):
     ## get rid of components with fewer than min_nodes nodes
-    g = nx.from_numpy_matrix(full_adj_matrix)
+    g = nx.from_scipy_sparse_matrix(full_adj_matrix)
     cpt_nodes = nx.connected_components(g)
     nodes = []
     for cpt in cpt_nodes:
         if len(cpt) >= min_nodes:
             nodes.extend(cpt)
     subgraph = g.subgraph(nodes)
-    return nx.to_numpy_matrix(subgraph).A, labels[subgraph.nodes()]
+    return nx.to_scipy_sparse_matrix(subgraph), labels[subgraph.nodes()]
 
 def largest_connected_component(adj_matrix, labels):
-    g = nx.from_numpy_matrix(adj_matrix)
+    g = nx.from_scipy_sparse_matrix(adj_matrix)
     cpts = nx.connected_component_subgraphs(g)
 
-    return nx.to_numpy_matrix(cpts[0]).A, labels[cpts[0].nodes()]
+    return nx.to_scipy_sparse_matrix(cpts[0]), labels[cpts[0].nodes()]
 
 def compute_n_components(adj_matrix):
-    g = nx.from_numpy_matrix(adj_matrix)
+    g = nx.from_scipy_sparse_matrix(adj_matrix)
     cpts = nx.connected_component_subgraphs(g)
     return len(cpts)
+
+def sparse_fill_diag(M, value):
+    for i in range(M.shape[0]):
+        M[i, i] = value
     
 def main_integrated_component(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
     W = matlab_data["W"]
-    W1= W[0,0].toarray()
-    W2 = W[0,1].toarray()
-    W3, W4 = W[0, 2].toarray(), W[0, 3].toarray()
-    W5 = W[0, 4].toarray()
-    
-    np.fill_diagonal(W1, 0)
-    np.fill_diagonal(W2, 0)
-    np.fill_diagonal(W3, 0)
-    np.fill_diagonal(W4, 0)
-    np.fill_diagonal(W5, 0)
+    W1= W[0,0]
+    W2 = W[0,1]
+    W3, W4 = W[0, 2], W[0, 3]
+    W5 = W[0, 4]
+
+    for M in (W1, W2, W3, W4, W5):
+        sparse_fill_diag(M, 0.0)
     
     all_labels = matlab_data["yMat"]
     all_labels[all_labels == -1] = 0
@@ -92,22 +93,22 @@ def main_integrated_component(argv):
     n_folds, n_runs = 5, 3
     n_clusters = 1000
     print "integrated network has {} nodes, {} edges".format(
-        adj_matrix.shape[0], (adj_matrix != 0).sum() / 2)
+        adj_matrix.shape[0], (adj_matrix.data != 0).sum() / 2)
     print_scores(adj_matrix, labels, n_folds, n_runs, 3, n_clusters)
-    
+        
 def main_transduction(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
     W = matlab_data["W"]
-    W1= W[0,0].toarray()
-    W2 = W[0,1].toarray()
-    W3, W4 = W[0, 2].toarray(), W[0, 3].toarray()
-    W5 = W[0, 4].toarray()
-    
-    np.fill_diagonal(W1, 0)
-    np.fill_diagonal(W2, 0)
-    np.fill_diagonal(W3, 0)
-    np.fill_diagonal(W4, 0)
-    np.fill_diagonal(W5, 0)
+    W1= W[0,0]
+    W2 = W[0,1]
+    W3, W4 = W[0, 2], W[0, 3]
+    W5 = W[0, 4]
+
+    for M in (W1, W2, W3, W4, W5):
+        sparse_fill_diag(M, 0.0)
+
+    ## to check:
+    assert (W1[5, 5] == 0.0 and W4[33, 33] == 0.0)
     
     all_labels = matlab_data["yMat"]
     all_labels[all_labels == -1] = 0
@@ -158,7 +159,7 @@ def main_transduction(argv):
     # return 0
 
     min_nodes = 6
-    n_folds, n_runs = 5, 3
+    n_folds, n_runs = 5, 5
     print ">> n_runs", n_runs
     for i, full_adj_matrix in enumerate((W1,)): # W2, W3, W4)): #, W5):
         print "W{} --------------".format(i + 1)
@@ -168,7 +169,7 @@ def main_transduction(argv):
         print ("subgraph w/ min_nodes {} has {} components, "
                "{} nodes, {} edges").format(
                    min_nodes, n_cpts, adj_matrix.shape[0],
-                   (adj_matrix != 0).sum() / 2)
+                   (adj_matrix.data != 0).sum() / 2)
 
         print_scores(adj_matrix, labels, n_folds, n_runs, 3, 1000)
 
@@ -185,8 +186,7 @@ def compute_balance_cutoff(labels, balance):
 def print_scores(adj_matrix, all_labels, n_folds,
                  n_prc_runs, n_kfold_trials, n_clusters):
     clf = TransductiveClassifier(n_runs=n_prc_runs,
-                                 n_clusters=n_clusters,
-                                 cluster_algo=run_ipr)
+                                 n_clusters=n_clusters)
     #clf = SpectralPropogation()
 
     predicted_true_tuples = []
