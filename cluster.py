@@ -1,9 +1,10 @@
-import sys, itertools
+import sys, itertools, time, multiprocessing
 import numpy as np
 import networkx as nx
 import scipy.io
+from joblib import Parallel, delayed
 
-from sklearn.cluster import SpectralClustering
+#from sklearn.cluster import SpectralClustering
 from sklearn import metrics
 from sklearn.cross_validation import KFold, StratifiedKFold
 from sklearn.semi_supervised import LabelSpreading
@@ -13,10 +14,13 @@ from sk_prc.cluster import PinchRatioCppClustering
 
 from transduction import TransductiveCliqueClassifier, \
     TransductiveGlobClassifier, TransductiveClassifier, \
-    TransductiveAnchoredClassifier, run_ipr
+    TransductiveAnchoredClassifier, run_ipr, \
+    TransductiveBaggingClassifier
 from propogation import SpectralPropogation
 
 np.random.seed(111)
+n_cpus = multiprocessing.cpu_count()
+n_jobs = min(n_cpus, 8)
 
 def sparse_matrix_iterate(x):
     cx = x.tocoo()    
@@ -70,6 +74,9 @@ def compute_n_components(adj_matrix):
 def sparse_fill_diag(M, value):
     for i in range(M.shape[0]):
         M[i, i] = value
+
+def reindent(s, level):
+    return "\n".join(" " * level + l for l in s.splitlines())
     
 def main_integrated_component(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
@@ -86,16 +93,34 @@ def main_integrated_component(argv):
     all_labels[all_labels == -1] = 0
 
     integrated_network = (W1 + W2 + W3 + W4 + W5) / 5.0
+    ##integrated_network = (2.21*W1 + 0.18*W2 + 0.94*W3 + 0.74*W4 + 0.93*W5) / 5.0    
 
     adj_matrix, labels = largest_connected_component(
         integrated_network, all_labels)
     
-    n_folds, n_runs = 5, 3
+    n_folds, n_runs = 5, 7
     n_clusters = 1000
+    n_kfold_trials = 3
+    
     print "integrated network has {} nodes, {} edges".format(
         adj_matrix.shape[0], (adj_matrix.data != 0).sum() / 2)
-    print_scores(adj_matrix, labels, n_folds, n_runs, 3, n_clusters)
-        
+    ## print_scores(adj_matrix, labels, n_folds, n_runs, 3, n_clusters)
+
+    for n_base_prc_runs in (1, 3):
+        for n_bagging_models, sample_ratio in [(10, 0.75),
+                                               (15, 0.625),
+                                               (20, 0.5)]:
+            print("n_folds {}, n_models {}, sample_ratio {:.3f},"
+                  "base_prc_runs {}, kfold_trials {}".format(
+                      n_folds, n_bagging_models, sample_ratio,
+                      n_base_prc_runs, n_kfold_trials))
+
+            start_time = time.time()
+            s = scores_str(adj_matrix, labels, n_folds, n_bagging_models,
+                           sample_ratio, n_base_prc_runs, n_kfold_trials)
+            print reindent(s, 2)
+            print "  run took {:.1f}s".format(time.time() - start_time)
+    
 def main_transduction(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
     W = matlab_data["W"]
@@ -160,18 +185,33 @@ def main_transduction(argv):
 
     min_nodes = 6
     n_folds, n_runs = 5, 5
+    n_kfold_trials = 3
+    n_base_prc_runs = 1
+
+    result_strings = Parallel(n_jobs=n_jobs)
+    
     print ">> n_runs", n_runs
-    for i, full_adj_matrix in enumerate((W1,)): # W2, W3, W4)): #, W5):
-        print "W{} --------------".format(i + 1)
+    for i, full_adj_matrix in enumerate((W1, W2, W3, W4)): #, W5):
+        print "W{} {}".format(i + 1, "-"*60)
         adj_matrix, labels = remove_small_components(
             full_adj_matrix, all_labels, min_nodes)
         n_cpts = compute_n_components(adj_matrix)
-        print ("subgraph w/ min_nodes {} has {} components, "
-               "{} nodes, {} edges").format(
-                   min_nodes, n_cpts, adj_matrix.shape[0],
-                   (adj_matrix.data != 0).sum() / 2)
+        print("subgraph w/ min_nodes {} has {} components, "
+              "{} nodes, {} edges").format(
+                  min_nodes, n_cpts, adj_matrix.shape[0],
+                  (adj_matrix.data != 0).sum() / 2)
 
-        print_scores(adj_matrix, labels, n_folds, n_runs, 3, 1000)
+        for n_base_prc_runs in (1, 3):
+            for n_bagging_models, sample_ratio in [(10, .75),
+                                                   (20, .5),
+                                                   (40, .25)]:
+                print("n_folds {}, n_models {}, sample_ratio {:.3f},"
+                      "base_prc_runs {}, kfold_trials {}".format(
+                          n_folds, n_bagging_models, sample_ratio,
+                          n_base_prc_runs, n_kfold_trials))
+                s = scores_str(adj_matrix, labels, n_folds, n_bagging_models,
+                               sample_ratio, n_base_prc_runs, n_kfold_trials)
+                print reindent(s, 2)
 
 def compute_balance_cutoff(labels, balance):
     """ compute d such that (labels > d).sum()/len(labels) is 1 - balance 
@@ -182,13 +222,15 @@ def compute_balance_cutoff(labels, balance):
             return cutoff
     ## shouldn't get here...
     return 0.5
-        
-def print_scores(adj_matrix, all_labels, n_folds,
-                 n_prc_runs, n_kfold_trials, n_clusters):
-    clf = TransductiveClassifier(n_runs=n_prc_runs,
-                                 n_clusters=n_clusters)
-    #clf = SpectralPropogation()
 
+def scores_str(adj_matrix, all_labels, n_folds, n_bagging_models,
+                 sample_ratio, n_base_prc_runs, n_kfold_trials):
+    ret = []
+    # clf = TransductiveClassifier(n_runs=n_prc_runs,
+    #                              n_clusters=n_clusters)
+    clf = TransductiveBaggingClassifier(n_base_prc_runs, -1,
+                                        n_bagging_models, sample_ratio)
+    
     predicted_true_tuples = []
     for i in range(n_kfold_trials):
         for train_idxs, test_idxs in KFold(
@@ -218,8 +260,9 @@ def print_scores(adj_matrix, all_labels, n_folds,
             try:
                 scores.append(metrics.roc_auc_score(true_labels[:, label_index],
                                                     pred_labels[:, label_index]))
-            except ValueError:
-                print "  --> {} 0s, {} 1s".format(l1, l2)
+            except ValueError, e:
+                ret.append("  --> {} 0s, {} 1s".format(l1, l2))
+                ret.append(str(e))
 
             cutoff = compute_balance_cutoff(pred_labels[:, label_index],
                                             label_balance)
@@ -228,7 +271,8 @@ def print_scores(adj_matrix, all_labels, n_folds,
                     balanced_accuracy(true_labels[:, label_index],
                                       pred_labels[:, label_index] > cutoff))
             except IndexError:
-                print "BAD ACCURACY SCORE!"
+                ret.append("BAD ACCURACY SCORE!,"
+                           " label_index {}".format(label_index))
                 
             try:
                 ari_scores.append(
@@ -236,22 +280,25 @@ def print_scores(adj_matrix, all_labels, n_folds,
                         true_labels[:, label_index],
                         pred_labels[:, label_index] > cutoff))
             except:
-                print "BAD ARI SCORE!"
+                ret.append("BAD ARI SCORE!, label_index {}".format(
+                    label_index))
+                    
                         
             # print "  {} predicted 1, {} true 1".format(
             #     pred_labels[:, label_index].sum(),
             #     true_labels[:, label_index].sum())
 
         all_scores.extend(scores)
-        print ("cls {:>2} AUC {:.3f} ({:.3f}),"
-               " acc. {:.3f} ({:.3f}),"
-               " ARI {:.3f} ({:.3f}), bal. {:.3f}".format(
-                   label_index, np.mean(scores), np.std(scores),
-                   np.mean(accuracy_scores), np.std(accuracy_scores),
-                   np.mean(ari_scores), np.std(ari_scores),
-                   label_balance))
-    print "Average ROC {:.3f} ({:.3f})".format(np.mean(all_scores),
-                                               np.std(all_scores))
+        ret.append(("cls {:>2} AUC {:.3f} ({:.3f}),"
+                    " acc. {:.3f} ({:.3f}),"
+                    " ARI {:.3f} ({:.3f}), bal. {:.3f}".format(
+                        label_index, np.mean(scores), np.std(scores),
+                        np.mean(accuracy_scores), np.std(accuracy_scores),
+                        np.mean(ari_scores), np.std(ari_scores),
+                        label_balance)))
+    ret.append("Average ROC {:.3f} ({:.3f})".format(np.mean(all_scores),
+                                                    np.std(all_scores)))
+    return "\n".join(ret)
 
 def main_anchored_classifier(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
@@ -370,6 +417,6 @@ def main(argv):
 
 if __name__ == '__main__':
 #    sys.exit(main_transduction(sys.argv))
-    sys.exit(main_transduction(sys.argv))
+    #sys.exit(main_transduction(sys.argv))
     #sys.exit(main_anchored_classifier(sys.argv))
-    #sys.exit(main_integrated_component(sys.argv))
+    sys.exit(main_integrated_component(sys.argv))

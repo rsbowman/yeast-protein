@@ -1,4 +1,4 @@
-import itertools
+import itertools, hashlib, random
 from collections import defaultdict
 from math import floor
 
@@ -221,6 +221,143 @@ class TransductiveCliqueClassifier(object):
                     new_labels[i] = mce
         return new_labels
 
+def hash_array(a):
+    if issparse(a):
+        b = a.toarray()
+    else:
+        b = a
+    return hashlib.sha1(b).hexdigest()
+
+def remove_rows_cols(arr, indices):
+    new_arr = arr.copy()
+    for i in sorted(indices, reverse=True):
+        new_arr = np.delete(np.delete(new_arr, i, 0), i, 1)
+    return new_arr
+
+from sklearn.cross_validation import KFold
+
+class TransductiveBaggingClassifier(object):
+    def __init__(self, base_n_runs, base_n_clusters,
+                 n_models, sample_ratio):
+        ## values to pass TransductiveClassifier
+        self.n_runs = base_n_runs
+        self.n_clusters = base_n_clusters
+        ## number of times to draw samples, percent of all unmarked nodes
+        ## to put in each sample
+        self.n_models = n_models
+        self.sample_ratio = sample_ratio
+
+    def fit(self, data, labels):
+        if not issparse(data):
+            data = csc_matrix(data)
+
+        unmarked_idxs = np.where(labels[:, 0] == -1)[0]
+        n_unmarked = len(unmarked_idxs)
+        sample_size = int(self.sample_ratio * n_unmarked)
+        
+        new_sublabels = np.zeros((n_unmarked, labels.shape[1]), dtype=float)
+        unmarked_point_probs = defaultdict(list)
+
+        for t in range(self.n_models):
+            all_idxs = range(n_unmarked)
+            random.shuffle(all_idxs)
+            keep_raw_idxs = sorted(all_idxs[:sample_size])
+            delete_raw_idxs = sorted(all_idxs[sample_size:])
+            keep_idxs, delete_idxs = (unmarked_idxs[keep_raw_idxs],
+                                      unmarked_idxs[delete_raw_idxs])
+
+            bagging_graph = nx.from_scipy_sparse_matrix(data)
+            bagging_graph.remove_nodes_from(delete_idxs)
+            bagging_adj_matrix = nx.to_scipy_sparse_matrix(bagging_graph)
+            bagging_labels = np.delete(labels, delete_idxs, 0)
+            bagging_unmarked_idxs = np.where(
+                bagging_labels[:, 0] == -1)[0]
+            
+            clf = TransductiveClassifier(self.n_runs, self.n_clusters)
+            clf.fit(bagging_adj_matrix, bagging_labels)
+
+            assert len(keep_idxs) == len(bagging_unmarked_idxs)
+            for i, idx in enumerate(keep_idxs):
+                unmarked_point_probs[idx].append(
+                    clf.transduction_[bagging_unmarked_idxs[i]])
+
+        new_labels = labels.copy().astype(float)
+        for i in unmarked_idxs:
+            new_labels[i] = np.mean(unmarked_point_probs[i], 0)
+
+        assert not (new_labels == -1.0).any()
+        self.transduction_ = new_labels
+        
+        return self
+
+# class OldTransductiveBaggingClassifier(object):
+#     def __init__(self, base_n_runs, base_n_clusters,
+#                  n_folds, n_percentage=0.5):
+#         ## values to pass TransductiveClassifier
+#         self.n_runs = base_n_runs
+#         self.n_clusters = base_n_clusters
+#         ## number of times to draw samples, percent of all unmarked nodes
+#         ## to put in each sample
+#         self.n_folds = n_folds
+#         self.n_percentage = n_percentage
+        
+#     def fit(self, data, labels):
+#         if not issparse(data):
+#             data = csc_matrix(data)
+        
+#         ## XXX: assume that unmarked rows are ALL unmarked
+#         unmarked_idxs = np.where(labels[:, 0] == -1)[0]
+#         n_unmarked = len(unmarked_idxs)
+
+#         new_sublabels = np.zeros((n_unmarked, labels.shape[1]), dtype=float)
+#         unmarked_point_probs = defaultdict(list)
+
+#         for train_idxs, test_idxs in KFold(
+#                 n_unmarked, n_folds=self.n_folds,
+#                 shuffle=True):
+#             todelete_idxs = unmarked_idxs[test_idxs]
+#             #print "to delete: ", todelete_idxs
+            
+#             bagging_graph = nx.from_scipy_sparse_matrix(data)
+#             #print "bg before", bagging_graph.edges()
+#             bagging_graph.remove_nodes_from(todelete_idxs)
+#             #print "bg after", bagging_graph.edges()            
+#             bagging_adj_matrix = nx.to_scipy_sparse_matrix(bagging_graph)
+#             bagging_labels = np.delete(labels, todelete_idxs, 0)
+
+#             #print "bagging adj. and labels"
+#             #print data.toarray()
+            
+#             #print bagging_adj_matrix.toarray()
+#             #print bagging_labels
+#             bagging_unmarked_idxs = np.where(
+#                 bagging_labels[:, 0] == -1)[0]
+#             clf = TransductiveClassifier(
+#                 self.n_runs, self.n_clusters)
+
+#             clf.fit(bagging_adj_matrix, bagging_labels)
+#             assert len(train_idxs) == len(bagging_unmarked_idxs)
+#             for i, j in enumerate(train_idxs):
+#                 unmarked_point_probs[j].append(
+#                     clf.transduction_[bagging_unmarked_idxs[i]])
+
+#             #print "unmarked point probs"
+#             #print unmarked_point_probs
+#             # # print "ds, xduction"
+#             # # print denoms
+#             # # print clf.transduction_[bagging_unmarked_idxs]
+#             # new_sublabels[train_idxs] += clf.transduction_[
+#             #     bagging_unmarked_idxs]
+#             # print "new_sublabels, test_idxs"
+#             # print new_sublabels, test_idxs
+            
+#         new_labels = labels.copy()
+#         for i, j in enumerate(unmarked_idxs):
+#             new_labels[j] = np.mean(unmarked_point_probs[i], 0)
+#         # new_labels[unmarked_idxs] = new_sublabels / denoms
+#         self.transduction_ = new_labels
+#         return self
+
 class TransductiveClassifier(object):
     def __init__(self, n_runs=1, n_clusters=1000,
                  cluster_algo=run_prc):
@@ -230,32 +367,56 @@ class TransductiveClassifier(object):
         ## a large value splits at every opportunity
         self.n_clusters = n_clusters
         self.cluster_algo = cluster_algo
+        self.array_hash = None
         
-    def fit(self, data, labels):
-        """ data is an adjacency matrix, vertices with label -1
-        will be assigned labels
-        """
+    def _fit(self, data):
         if not issparse(data):
             data = csc_matrix(data)
-            
         assert (data.diagonal() == 0.0).all()
         graph = nx.from_scipy_sparse_matrix(data)
-        components = nx.connected_component_subgraphs(graph)
+        self.graph_components = nx.connected_component_subgraphs(graph)
+
+        clf = self.cluster_label_family = defaultdict(list)
+        for cpt in self.graph_components:
+            for i in range(self.n_runs):
+                adj_matrix = nx.to_scipy_sparse_matrix(cpt)
+                ordering = np.arange(adj_matrix.shape[0])
+                np.random.shuffle(ordering)
+                clf[cpt].append(self.cluster_algo(
+                    adj_matrix, ordering, self.n_clusters))
+
+    def fit(self, data, labels):
+        if self.array_hash is None:
+            self._fit(data)
+            self.array_hash = hash_array(data)
+        else:
+            assert hash_array(data) == self.array_hash
+
+        # print "data, labels"
+        # print data.toarray()
+        # print labels
+
+        assert data.shape[0] == labels.shape[0]
+        
         if len(labels.shape) < 2:
             new_labels = labels.copy().reshape((len(labels), 1)).astype(float)
         else:
             new_labels = labels.copy().astype(float)
 
         avg_labels = [new_labels.copy() for i in range(self.n_runs)]
-        for cpt in components:
+        for cpt in self.graph_components:
             for i in range(self.n_runs):
-                self._fit_one_cpt(cpt, avg_labels[i])
+                self._predict_one_cpt(
+                    cpt, self.cluster_label_family[cpt][i],
+                    avg_labels[i])
 
         new_labels = np.zeros_like(new_labels)
         for i in range(self.n_runs):
             new_labels += avg_labels[i]
         new_labels /= self.n_runs
 
+        # print "New labels"
+        # print new_labels
         assert not (new_labels == -1).any()
         
         if len(labels.shape) < 2:
@@ -264,19 +425,8 @@ class TransductiveClassifier(object):
             self.transduction_ = new_labels
             
         return self
-
-    def _fit_one_cpt(self, nx_cpt, labels):
-        adj_matrix = nx.to_scipy_sparse_matrix(nx_cpt)
-        ordering = np.arange(adj_matrix.shape[0])
-        np.random.shuffle(ordering)
-        n_clusters = self.n_clusters
-        ## other values tried for n_clusters: 1000 and
-        ##   np.clip(len(nx_cpt.nodes()) / 10, 2, 100)
-        cluster_labels = self.cluster_algo(adj_matrix, ordering, n_clusters)
-
-        # print "cpt size {}, clusters {}".format(
-        #     len(nx_cpt.nodes()), sorted(np.unique(cluster_labels)))
-        
+            
+    def _predict_one_cpt(self, nx_cpt, cluster_labels, labels):
         for label_index in range(labels.shape[1]):
             marked_labels = labels[:, label_index]
             marked_labels = marked_labels[marked_labels != -1]
@@ -287,7 +437,7 @@ class TransductiveClassifier(object):
             #     set(labels[:, label_index]) - set([-1]))
             
             for cl in np.unique(cluster_labels):
-                value = self._compute_cluster_proportion_parent(
+                value = self._compute_cluster_proportion(
                     cl, label_index, nx_cpt, cluster_labels,
                     labels, default_label)
                 
@@ -296,7 +446,7 @@ class TransductiveClassifier(object):
                         labels[node, label_index] == -1):
                         labels[node, label_index] = value
 
-    def _compute_cluster_proportion_parent(
+    def _compute_cluster_proportion(
             self, parent, label_index, nx_cpt,
             cluster_labels, labels, default_label):
         if parent == 1: # only one cluster; compute local average
@@ -304,9 +454,9 @@ class TransductiveClassifier(object):
             lls = lls[lls != -1]
             if len(lls):
                 local_default_label = lls.sum() / float(len(lls))
-                #print "XXX: local default", local_default_label, lls
+                ## print "XXX: local default", local_default_label, lls
             else:
-                print "YYY: global default"
+                ## print "YYY: global default"
                 local_default_label = default_label
             # print ("XXX: pc label 1, cpt size {}, "
             #        "index {}, loc. def. label {:.3f}, "
@@ -323,9 +473,9 @@ class TransductiveClassifier(object):
             print "ZZZ: all node in cpt. unlabeled"
             return default_label
 
-        max_cluster_label = cluster_labels.max()
         ## to use children_clusters, check below if cluster_labels[i]
         ## is in the set
+        ## max_cluster_label = cluster_labels.max()
         ##children_clusters = child_labels_for(parent, max_cluster_label)
 
         ones, total = 0.0, 0.0
@@ -339,84 +489,194 @@ class TransductiveClassifier(object):
             return ones / total 
         else:
             return default_label
-            # new_parent = int(floor(parent / 2.0))
-            # return self._compute_cluster_proportion_parent(
-            #     new_parent, label_index, nx_cpt,
-            #     cluster_labels, labels, default_label)
-        
-    def _compute_cluster_proportion_new(self, cluster, label_index,
-                                        nx_cpt, cluster_labels, labels,
-                                        default_label):
-        ## if they're all unlabeled:
-        if (labels[nx_cpt.nodes(), label_index] == -1).all():
-            print "XXX: all nodes unlabeled"
-            return default_label
-                     
-        ones, total = 0.0, 0.0
-        for i, node in enumerate(nx_cpt.nodes()):
-            if (cluster_labels[i] == cluster and
-                labels[node, label_index] != -1):
-                ones += labels[node, label_index]
-                total += 1.0
-        if total > 0.0:
-            value = ones / total
-        else:
-            ## compute proportion of parent cluster
-            parent_cluster = int(floor(cluster / 2.0))
-            ones, total = 0.0, 0.0
-            for i, node in enumerate(nx_cpt.nodes()):
-                if (cluster_labels[i] in [2*parent_cluster,
-                                          2*parent_cluster + 1] and
-                    labels[node, label_index] != -1):
-                    ones += labels[node, label_index]
-                    total += 1.0
-            if total > 0.0:
-                value = ones / total
-                #print "XXX found parent cluster w/ labels"
-            else:
-                #print "XXX totally unlabeled parent cluster"
-                value = default_label
-        return value
 
-    def _compute_cluster_proportion(self, cluster, label_index,
-                                    nx_cpt, cluster_labels, labels,
-                                    default_label):
-        ones, total = 0.0, 0.0
-        for i, node in enumerate(nx_cpt.nodes()):
-            if (cluster_labels[i] == cluster and
-                labels[node, label_index] != -1):
-                ones += labels[node, label_index]
-                total += 1.0
-        if total > 0.0:
-            value = ones / total
-        else:
-            value = default_label
+# #####    
+#     def fit(self, data, labels):
+#         """ data is an adjacency matrix, vertices with label -1
+#         will be assigned labels
+#         """
+#         if not issparse(data):
+#             data = csc_matrix(data)
             
-        return value
+#         assert (data.diagonal() == 0.0).all()
+#         graph = nx.from_scipy_sparse_matrix(data)
+#         components = nx.connected_component_subgraphs(graph)
+#         if len(labels.shape) < 2:
+#             new_labels = labels.copy().reshape((len(labels), 1)).astype(float)
+#         else:
+#             new_labels = labels.copy().astype(float)
+
+#         avg_labels = [new_labels.copy() for i in range(self.n_runs)]
+#         for cpt in components:
+#             for i in range(self.n_runs):
+#                 self._fit_one_cpt(cpt, avg_labels[i])
+
+#         new_labels = np.zeros_like(new_labels)
+#         for i in range(self.n_runs):
+#             new_labels += avg_labels[i]
+#         new_labels /= self.n_runs
+
+#         assert not (new_labels == -1).any()
+        
+#         if len(labels.shape) < 2:
+#             self.transduction_ = new_labels.reshape((len(labels),))
+#         else:
+#             self.transduction_ = new_labels
+            
+#         return self
+
+#     def _fit_one_cpt(self, nx_cpt, labels):
+#         adj_matrix = nx.to_scipy_sparse_matrix(nx_cpt)
+#         ordering = np.arange(adj_matrix.shape[0])
+#         np.random.shuffle(ordering)
+#         n_clusters = self.n_clusters
+#         ## other values tried for n_clusters: 1000 and
+#         ##   np.clip(len(nx_cpt.nodes()) / 10, 2, 100)
+#         cluster_labels = self.cluster_algo(adj_matrix, ordering, n_clusters)
+
+#         # print "cpt size {}, clusters {}".format(
+#         #     len(nx_cpt.nodes()), sorted(np.unique(cluster_labels)))
+        
+#         for label_index in range(labels.shape[1]):
+#             marked_labels = labels[:, label_index]
+#             marked_labels = marked_labels[marked_labels != -1]
+            
+#             default_label = (marked_labels.sum()
+#                              / float(len(marked_labels)))
+#             # default_label = most_common_element(
+#             #     set(labels[:, label_index]) - set([-1]))
+            
+#             for cl in np.unique(cluster_labels):
+#                 value = self._compute_cluster_proportion_parent(
+#                     cl, label_index, nx_cpt, cluster_labels,
+#                     labels, default_label)
+                
+#                 for i, node in enumerate(nx_cpt.nodes()):
+#                     if (cluster_labels[i] == cl and
+#                         labels[node, label_index] == -1):
+#                         labels[node, label_index] = value
+
+#     def _compute_cluster_proportion_parent(
+#             self, parent, label_index, nx_cpt,
+#             cluster_labels, labels, default_label):
+#         if parent == 1: # only one cluster; compute local average
+#             lls = labels[nx_cpt.nodes(), label_index] # local labels
+#             lls = lls[lls != -1]
+#             if len(lls):
+#                 local_default_label = lls.sum() / float(len(lls))
+#                 #print "XXX: local default", local_default_label, lls
+#             else:
+#                 print "YYY: global default"
+#                 local_default_label = default_label
+#             # print ("XXX: pc label 1, cpt size {}, "
+#             #        "index {}, loc. def. label {:.3f}, "
+#             #        "def. label {:.3f}").format(
+#             #            len(nx_cpt.nodes()), label_index,
+#             #            local_default_label, default_label)
+#             # print "clusters {}, labels {}".format(
+#             #     cluster_labels, labels[nx_cpt.nodes(), label_index])
+            
+#             return local_default_label
+            
+#         ## if they're all unlabeled:
+#         if (labels[nx_cpt.nodes(), label_index] == -1).all():
+#             print "ZZZ: all node in cpt. unlabeled"
+#             return default_label
+
+#         max_cluster_label = cluster_labels.max()
+#         ## to use children_clusters, check below if cluster_labels[i]
+#         ## is in the set
+#         ##children_clusters = child_labels_for(parent, max_cluster_label)
+
+#         ones, total = 0.0, 0.0
+#         for i, node in enumerate(nx_cpt.nodes()):
+#             if (labels[node, label_index] != -1 and
+#                 cluster_labels[i] == parent):
+#                 ones += labels[node, label_index]
+#                 total += 1.0
+#         if total > 0.0:
+#             #print "WWW: actually assigned probs."
+#             return ones / total 
+#         else:
+#             return default_label
+#             # new_parent = int(floor(parent / 2.0))
+#             # return self._compute_cluster_proportion_parent(
+#             #     new_parent, label_index, nx_cpt,
+#             #     cluster_labels, labels, default_label)
+        
+#     def _compute_cluster_proportion_new(self, cluster, label_index,
+#                                         nx_cpt, cluster_labels, labels,
+#                                         default_label):
+#         ## if they're all unlabeled:
+#         if (labels[nx_cpt.nodes(), label_index] == -1).all():
+#             print "XXX: all nodes unlabeled"
+#             return default_label
+                     
+#         ones, total = 0.0, 0.0
+#         for i, node in enumerate(nx_cpt.nodes()):
+#             if (cluster_labels[i] == cluster and
+#                 labels[node, label_index] != -1):
+#                 ones += labels[node, label_index]
+#                 total += 1.0
+#         if total > 0.0:
+#             value = ones / total
+#         else:
+#             ## compute proportion of parent cluster
+#             parent_cluster = int(floor(cluster / 2.0))
+#             ones, total = 0.0, 0.0
+#             for i, node in enumerate(nx_cpt.nodes()):
+#                 if (cluster_labels[i] in [2*parent_cluster,
+#                                           2*parent_cluster + 1] and
+#                     labels[node, label_index] != -1):
+#                     ones += labels[node, label_index]
+#                     total += 1.0
+#             if total > 0.0:
+#                 value = ones / total
+#                 #print "XXX found parent cluster w/ labels"
+#             else:
+#                 #print "XXX totally unlabeled parent cluster"
+#                 value = default_label
+#         return value
+
+#     def _compute_cluster_proportion(self, cluster, label_index,
+#                                     nx_cpt, cluster_labels, labels,
+#                                     default_label):
+#         ones, total = 0.0, 0.0
+#         for i, node in enumerate(nx_cpt.nodes()):
+#             if (cluster_labels[i] == cluster and
+#                 labels[node, label_index] != -1):
+#                 ones += labels[node, label_index]
+#                 total += 1.0
+#         if total > 0.0:
+#             value = ones / total
+#         else:
+#             value = default_label
+            
+#         return value
 
         
-    def _fit_one_cpt_proportion(self, nx_cpt, labels):
-        adj_matrix = nx.to_numpy_matrix(nx_cpt).A
-        ordering = np.arange(adj_matrix.shape[0])
-        cluster_labels = run_prc(adj_matrix, ordering, 5)
+#     def _fit_one_cpt_proportion(self, nx_cpt, labels):
+#         adj_matrix = nx.to_numpy_matrix(nx_cpt).A
+#         ordering = np.arange(adj_matrix.shape[0])
+#         cluster_labels = run_prc(adj_matrix, ordering, 5)
 
-        for label_index in range(labels.shape[1]):
-            lbls = labels[:, label_index] # HACK
-            average_ones = (lbls == 1).sum() / float((lbls != -1).sum())
+#         for label_index in range(labels.shape[1]):
+#             lbls = labels[:, label_index] # HACK
+#             average_ones = (lbls == 1).sum() / float((lbls != -1).sum())
 
-            for cl in np.unique(cluster_labels):
-                ones, total = 0.0, 0.0
-                for i, node in enumerate(nx_cpt.nodes()):
-                    if (cluster_labels[i] == cl and
-                        labels[node, label_index] != -1):
-                        ones += labels[node, label_index]
-                        total += 1
-                ones_proportion = ones / total
-                value = int(ones_proportion > average_ones)
-                for i, node in enumerate(nx_cpt.nodes()):
-                    if (cluster_labels[i] == cl and
-                        labels[node, label_index] == -1):
-                        labels[node, label_index] = value
+#             for cl in np.unique(cluster_labels):
+#                 ones, total = 0.0, 0.0
+#                 for i, node in enumerate(nx_cpt.nodes()):
+#                     if (cluster_labels[i] == cl and
+#                         labels[node, label_index] != -1):
+#                         ones += labels[node, label_index]
+#                         total += 1
+#                 ones_proportion = ones / total
+#                 value = int(ones_proportion > average_ones)
+#                 for i, node in enumerate(nx_cpt.nodes()):
+#                     if (cluster_labels[i] == cl and
+#                         labels[node, label_index] == -1):
+#                         labels[node, label_index] = value
             
             # ## find out which has more 1's
             # max_ones_cl = -1
