@@ -2,7 +2,6 @@ import sys, itertools, time, multiprocessing
 import numpy as np
 import networkx as nx
 import scipy.io
-from joblib import Parallel, delayed
 
 #from sklearn.cluster import SpectralClustering
 from sklearn import metrics
@@ -17,6 +16,9 @@ from transduction import TransductiveCliqueClassifier, \
     TransductiveAnchoredClassifier, run_ipr, \
     TransductiveBaggingClassifier
 from propogation import SpectralPropogation
+
+import logging
+logging.basicConfig()
 
 np.random.seed(111)
 n_cpus = multiprocessing.cpu_count()
@@ -58,13 +60,15 @@ def remove_small_components(full_adj_matrix, labels, min_nodes):
         if len(cpt) >= min_nodes:
             nodes.extend(cpt)
     subgraph = g.subgraph(nodes)
-    return nx.to_scipy_sparse_matrix(subgraph), labels[subgraph.nodes()]
+    return (nx.to_scipy_sparse_matrix(subgraph, format="csc"),
+            labels[subgraph.nodes()])
 
 def largest_connected_component(adj_matrix, labels):
     g = nx.from_scipy_sparse_matrix(adj_matrix)
     cpts = nx.connected_component_subgraphs(g)
 
-    return nx.to_scipy_sparse_matrix(cpts[0]), labels[cpts[0].nodes()]
+    return (nx.to_scipy_sparse_matrix(cpts[0], format="csc"),
+            labels[cpts[0].nodes()])
 
 def compute_n_components(adj_matrix):
     g = nx.from_scipy_sparse_matrix(adj_matrix)
@@ -77,7 +81,14 @@ def sparse_fill_diag(M, value):
 
 def reindent(s, level):
     return "\n".join(" " * level + l for l in s.splitlines())
-    
+
+def format_seconds(secs):
+    if secs < 60:
+        return "{}s".format(int(secs))
+    else:
+        m, s = divmod(secs, 60)
+        return "{}m {}s".format(int(m), int(s))
+        
 def main_integrated_component(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
     W = matlab_data["W"]
@@ -115,16 +126,14 @@ def main_integrated_component(argv):
                       n_folds, n_bagging_models, sample_ratio,
                       n_base_prc_runs, n_kfold_trials))
 
-            start_time = time.time()
             s = scores_str(adj_matrix, labels, n_folds, n_bagging_models,
                            sample_ratio, n_base_prc_runs, n_kfold_trials)
             print reindent(s, 2)
-            print "  run took {:.1f}s".format(time.time() - start_time)
     
 def main_transduction(argv):
     matlab_data = scipy.io.loadmat("multi_biograph.mat")
     W = matlab_data["W"]
-    W1= W[0,0]
+    W1 = W[0,0]
     W2 = W[0,1]
     W3, W4 = W[0, 2], W[0, 3]
     W5 = W[0, 4]
@@ -138,81 +147,44 @@ def main_transduction(argv):
     all_labels = matlab_data["yMat"]
     all_labels[all_labels == -1] = 0
 
-    # integrated_largest_cpt, all_labels = largest_connected_component(
-    #     integrated_network, all_labels)
-    
-    # g = nx.from_numpy_matrix(W1)
-    # cpts = nx.connected_component_subgraphs(g)
-
-    # for i, cpt in enumerate(cpts[:10]):
-    #     cpt_labels = all_labels[cpt.nodes(), 11]
-    #     print "cpt {} has {} 0s, {} 1s".format(
-    #         i, (cpt_labels == 0).sum(), (cpt_labels == 1).sum())
-        
-    # # print labels for cpt 2
-    # for label_index in range(13):
-    #     cpt1_labels = all_labels[cpts[1].nodes(), label_index]
-    #     print "weird cpt, label index {} has {} 0s, {} 1s".format(
-    #         label_index,
-    #         (cpt1_labels == 0).sum(),
-    #         (cpt1_labels == 1).sum())
-    
-    # for i, cpt in enumerate(cpts[:10]):
-    #     adj = nx.to_numpy_matrix(cpt).A
-    #     print "cpt {} has {} nodes, {} edges, {} >.9 weight".format(
-    #         i, len(cpt.nodes()), len(cpt.edges()),
-    #         (adj > 0.9).sum() / 2.)
-    # # print "largest cpt has {} nodes, {} edges".format(
-    # #     len(largest_cpt.nodes()), len(largest_cpt.edges()))
-    
-    # adj_matrix = nx.to_numpy_matrix(largest_cpt).A
-    # #all_labels = all_labels[largest_cpt.nodes()]
-
-    # #write out dot file:
-    # g = cpts[7]
-    # label_index = 0
-    # with open("xductive-graph.dot", "w") as f:
-    #     colors = ["black", "red", "blue", "green"]
-    #     for n in g.nodes():
-    #         if all_labels[n, label_index] == -1:
-    #             g.node[n]["shape"] = "box"
-    #         else:
-    #             g.node[n]["shape"] = "circle"
-    #         if all_labels[n, label_index] != -1:
-    #             g.node[n]["color"] = colors[all_labels[n, label_index]]
-    #     nx.write_dot(g, f)
-    # return 0
-
     min_nodes = 6
     n_folds, n_runs = 5, 5
     n_kfold_trials = 3
     n_base_prc_runs = 1
 
-    result_strings = Parallel(n_jobs=n_jobs)
-    
+    n_bagging_models = 20
+    sample_ratio = 0.5
+
+    start_time = time.time()
     print ">> n_runs", n_runs
     for i, full_adj_matrix in enumerate((W1, W2, W3, W4)): #, W5):
         print "W{} {}".format(i + 1, "-"*60)
-        adj_matrix, labels = remove_small_components(
-            full_adj_matrix, all_labels, min_nodes)
-        n_cpts = compute_n_components(adj_matrix)
-        print("subgraph w/ min_nodes {} has {} components, "
-              "{} nodes, {} edges").format(
-                  min_nodes, n_cpts, adj_matrix.shape[0],
-                  (adj_matrix.data != 0).sum() / 2)
 
-        for n_base_prc_runs in (1, 3):
-            for n_bagging_models, sample_ratio in [(10, .75),
-                                                   (20, .5),
-                                                   (40, .25)]:
-                print("n_folds {}, n_models {}, sample_ratio {:.3f},"
+        for min_nodes in (2, 4, 6):
+            adj_matrix, labels = remove_small_components(
+                full_adj_matrix, all_labels, min_nodes)
+            n_cpts = compute_n_components(adj_matrix)
+            print("subgraph w/ min_nodes {} has {} components, "
+                  "{} nodes, {} edges").format(
+                      min_nodes, n_cpts, adj_matrix.shape[0],
+                      (adj_matrix.data != 0).sum() / 2)
+
+            for n_base_prc_runs, n_bagging_models, sample_ratio in [
+                    (1, 20, 0.5),
+                    (3, 20, 0.5),
+                    (1, 40, 0.5),
+                    (1, 20, 0.75),
+                    (1, 50, 0.25)]:
+                print("n_folds {}, n_models {}, sample_ratio {:.2f}, "
                       "base_prc_runs {}, kfold_trials {}".format(
                           n_folds, n_bagging_models, sample_ratio,
                           n_base_prc_runs, n_kfold_trials))
                 s = scores_str(adj_matrix, labels, n_folds, n_bagging_models,
                                sample_ratio, n_base_prc_runs, n_kfold_trials)
-                print reindent(s, 2)
+                print reindent(s, 2) + "\n"
 
+    print "total {}".format(format_seconds(time.time() - start_time))
+    
 def compute_balance_cutoff(labels, balance):
     """ compute d such that (labels > d).sum()/len(labels) is 1 - balance 
     """
@@ -229,8 +201,10 @@ def scores_str(adj_matrix, all_labels, n_folds, n_bagging_models,
     # clf = TransductiveClassifier(n_runs=n_prc_runs,
     #                              n_clusters=n_clusters)
     clf = TransductiveBaggingClassifier(n_base_prc_runs, -1,
-                                        n_bagging_models, sample_ratio)
-    
+                                        n_bagging_models,
+                                        sample_ratio, n_jobs)
+
+    start_time = time.time()
     predicted_true_tuples = []
     for i in range(n_kfold_trials):
         for train_idxs, test_idxs in KFold(
@@ -243,7 +217,7 @@ def scores_str(adj_matrix, all_labels, n_folds, n_bagging_models,
             predicted = clf.transduction_
             predicted_true_tuples.append((clf.transduction_[test_idxs],
                                           all_labels[test_idxs]))
-
+            
     all_scores = []
     for label_index in range(all_labels.shape[1]):
         labels = all_labels[:, label_index]
@@ -296,8 +270,10 @@ def scores_str(adj_matrix, all_labels, n_folds, n_bagging_models,
                         np.mean(accuracy_scores), np.std(accuracy_scores),
                         np.mean(ari_scores), np.std(ari_scores),
                         label_balance)))
-    ret.append("Average ROC {:.3f} ({:.3f})".format(np.mean(all_scores),
-                                                    np.std(all_scores)))
+    ret.append("Average ROC {:.3f} ({:.3f}), run "
+               "took {}".format(np.mean(all_scores),
+                                np.std(all_scores),
+                                format_seconds(time.time() - start_time)))
     return "\n".join(ret)
 
 def main_anchored_classifier(argv):
@@ -417,6 +393,6 @@ def main(argv):
 
 if __name__ == '__main__':
 #    sys.exit(main_transduction(sys.argv))
-    #sys.exit(main_transduction(sys.argv))
+    sys.exit(main_transduction(sys.argv))
     #sys.exit(main_anchored_classifier(sys.argv))
-    sys.exit(main_integrated_component(sys.argv))
+    #sys.exit(main_integrated_component(sys.argv))

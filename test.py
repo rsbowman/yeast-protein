@@ -5,7 +5,7 @@ import networkx as nx
 from sk_prc import similarity
 from sk_prc.cluster import PinchRatioCppClustering
 
-from transduction import child_labels_for, remove_rows_cols
+from transduction import child_labels_for
 
 from transduction import TransductiveCliqueClassifier, \
     TransductiveGlobClassifier, TransductiveClassifier, \
@@ -17,14 +17,6 @@ class UtilTests(TestCase):
         self.assertEqual(sorted(child_labels_for(3, 11)), [3, 6, 7])
         self.assertEqual(sorted(child_labels_for(1, 15)), range(1, 16))
         self.assertEqual(sorted(child_labels_for(4, 8)), [4, 8])
-
-    def test_remove_rows_cols(self):
-        a = np.arange(16)
-        a.shape = (4,4)
-        b = remove_rows_cols(a, [0, 2])
-        self.assertEqual(b.shape, (2,2))
-        self.assertEqual(b[0, 0], 5)
-        self.assertEqual(b[1, 1], 15)
 
 class TransductionTests(TestCase):
     def dont_test_clique_transduction(self):

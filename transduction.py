@@ -1,6 +1,7 @@
 import itertools, hashlib, random
 from collections import defaultdict
 from math import floor
+from joblib import Parallel, delayed
 
 from scipy.sparse import csc_matrix, lil_matrix, issparse
 import numpy as np
@@ -8,8 +9,8 @@ import networkx as nx
 import prc
 
 def run_prc(adj_matrix, initial_order, n_clusters=2):
-    #adj_matrix = csc_matrix(adjacency_matrix)
-    assert issparse(adj_matrix)
+    adj_matrix = csc_matrix(adj_matrix)
+    #assert issparse(adj_matrix)
     N = adj_matrix.shape[0]
     order= prc.createOrder(initial_order)
     labels = prc.ivec([0] * N)
@@ -228,17 +229,38 @@ def hash_array(a):
         b = a
     return hashlib.sha1(b).hexdigest()
 
-def remove_rows_cols(arr, indices):
-    new_arr = arr.copy()
-    for i in sorted(indices, reverse=True):
-        new_arr = np.delete(np.delete(new_arr, i, 0), i, 1)
-    return new_arr
+## use transductive classifier on sample of points;
+## used for joblib parallelization
+def classify_samples(data, labels, unmarked_idxs,
+                     sample_size, n_runs, n_clusters):
+    unmarked_point_probs = {}
+    all_idxs = range(len(unmarked_idxs))
+    random.shuffle(all_idxs)
+    keep_raw_idxs = sorted(all_idxs[:sample_size])
+    delete_raw_idxs = sorted(all_idxs[sample_size:])
+    keep_idxs, delete_idxs = (unmarked_idxs[keep_raw_idxs],
+                              unmarked_idxs[delete_raw_idxs])
 
-from sklearn.cross_validation import KFold
+    bagging_graph = nx.from_scipy_sparse_matrix(data)
+    bagging_graph.remove_nodes_from(delete_idxs)
+    bagging_adj_matrix = nx.to_scipy_sparse_matrix(bagging_graph)
+    bagging_labels = np.delete(labels, delete_idxs, 0)
+    bagging_unmarked_idxs = np.where(
+        bagging_labels[:, 0] == -1)[0]
 
+    clf = TransductiveClassifier(n_runs, n_clusters)
+    clf.fit(bagging_adj_matrix, bagging_labels)
+
+    assert len(keep_idxs) == len(bagging_unmarked_idxs)
+    for i, idx in enumerate(keep_idxs):
+        unmarked_point_probs[idx] = clf.transduction_[
+            bagging_unmarked_idxs[i]]
+
+    return unmarked_point_probs
+    
 class TransductiveBaggingClassifier(object):
     def __init__(self, base_n_runs, base_n_clusters,
-                 n_models, sample_ratio):
+                 n_models, sample_ratio, n_jobs=1):
         ## values to pass TransductiveClassifier
         self.n_runs = base_n_runs
         self.n_clusters = base_n_clusters
@@ -246,41 +268,26 @@ class TransductiveBaggingClassifier(object):
         ## to put in each sample
         self.n_models = n_models
         self.sample_ratio = sample_ratio
+        self.n_jobs = n_jobs
 
     def fit(self, data, labels):
         if not issparse(data):
             data = csc_matrix(data)
 
         unmarked_idxs = np.where(labels[:, 0] == -1)[0]
-        n_unmarked = len(unmarked_idxs)
-        sample_size = int(self.sample_ratio * n_unmarked)
-        
-        new_sublabels = np.zeros((n_unmarked, labels.shape[1]), dtype=float)
+        sample_size = int(self.sample_ratio * len(unmarked_idxs))
+
+        all_unmarked_point_probs = Parallel(n_jobs=self.n_jobs)(
+            delayed(classify_samples)(data, labels, unmarked_idxs,
+                                      sample_size, self.n_runs,
+                                      self.n_clusters)
+            for i in range(self.n_models))
+
         unmarked_point_probs = defaultdict(list)
-
-        for t in range(self.n_models):
-            all_idxs = range(n_unmarked)
-            random.shuffle(all_idxs)
-            keep_raw_idxs = sorted(all_idxs[:sample_size])
-            delete_raw_idxs = sorted(all_idxs[sample_size:])
-            keep_idxs, delete_idxs = (unmarked_idxs[keep_raw_idxs],
-                                      unmarked_idxs[delete_raw_idxs])
-
-            bagging_graph = nx.from_scipy_sparse_matrix(data)
-            bagging_graph.remove_nodes_from(delete_idxs)
-            bagging_adj_matrix = nx.to_scipy_sparse_matrix(bagging_graph)
-            bagging_labels = np.delete(labels, delete_idxs, 0)
-            bagging_unmarked_idxs = np.where(
-                bagging_labels[:, 0] == -1)[0]
-            
-            clf = TransductiveClassifier(self.n_runs, self.n_clusters)
-            clf.fit(bagging_adj_matrix, bagging_labels)
-
-            assert len(keep_idxs) == len(bagging_unmarked_idxs)
-            for i, idx in enumerate(keep_idxs):
-                unmarked_point_probs[idx].append(
-                    clf.transduction_[bagging_unmarked_idxs[i]])
-
+        for upps in all_unmarked_point_probs:
+            for k, v in upps.items():
+                unmarked_point_probs[k].append(v)
+        
         new_labels = labels.copy().astype(float)
         for i in unmarked_idxs:
             new_labels[i] = np.mean(unmarked_point_probs[i], 0)
@@ -470,7 +477,7 @@ class TransductiveClassifier(object):
             
         ## if they're all unlabeled:
         if (labels[nx_cpt.nodes(), label_index] == -1).all():
-            print "ZZZ: all node in cpt. unlabeled"
+            ##print "ZZZ: all node in cpt. unlabeled"
             return default_label
 
         ## to use children_clusters, check below if cluster_labels[i]
